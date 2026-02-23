@@ -158,6 +158,7 @@ function logout() {
 
 // ─── 路由 ─────────────────────────────────────────────────────
 function navigate(page, params = {}) {
+  closeSidebar();
   state.page = page;
   Object.assign(state, params);
   renderPage(page);
@@ -171,6 +172,7 @@ function navigate(page, params = {}) {
 function showAuthPage() {
   $('app').innerHTML = '';
   $('app').appendChild(buildAuthPage());
+  renderLoginForm();
 }
 
 function showMainLayout() {
@@ -207,7 +209,6 @@ function buildAuthPage() {
     }
   }).catch(() => {});
 
-  renderLoginForm();
   return wrap;
 }
 
@@ -300,7 +301,8 @@ function buildMainLayout() {
 
   // sidebar
   layout.innerHTML = `
-    <nav class="sidebar">
+    <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="closeSidebar()"></div>
+    <nav class="sidebar" id="main-sidebar">
       <div class="sidebar-logo">
         <div class="logo-mark">✉</div>
         <div>
@@ -347,8 +349,11 @@ function buildMainLayout() {
     <div class="content" id="content-area">
       <div class="topbar">
         <div>
-          <div class="topbar-title" id="topbar-title">邮箱总览</div>
-          <div class="topbar-subtitle" id="topbar-subtitle"></div>
+          <button class="hamburger-btn" id="hamburger-btn" onclick="toggleSidebar()" aria-label="菜单">☰</button>
+          <div>
+            <div class="topbar-title" id="topbar-title">邮箱总览</div>
+            <div class="topbar-subtitle" id="topbar-subtitle"></div>
+          </div>
         </div>
         <div id="topbar-actions"></div>
       </div>
@@ -365,6 +370,27 @@ window.navigate = navigate;
 window.logout   = logout;
 window.copyText = copyText;
 window.tryLogin = tryLogin;
+
+window.toggleSidebar = function() {
+  const sidebar  = document.getElementById('main-sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (!sidebar) return;
+  const isOpen = sidebar.classList.contains('mob-open');
+  if (isOpen) {
+    sidebar.classList.remove('mob-open');
+    if (backdrop) backdrop.classList.remove('show');
+  } else {
+    sidebar.classList.add('mob-open');
+    if (backdrop) backdrop.classList.add('show');
+  }
+};
+
+window.closeSidebar = function() {
+  const sidebar  = document.getElementById('main-sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (sidebar)  sidebar.classList.remove('mob-open');
+  if (backdrop) backdrop.classList.remove('show');
+};
 
 // ─── 页面渲染路由 ───────────────────────────────────────────
 async function renderPage(page) {
@@ -730,7 +756,7 @@ async function renderDomainsGuide(container) {
 
   container.innerHTML = `
     ${pendingHtml}
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;max-width:1000px">
+    <div class="domain-guide-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;max-width:1000px">
       <div>
         <div class="card">
           <div class="card-header"><div class="card-title">◎ 可用域名池</div></div>
