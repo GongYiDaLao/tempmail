@@ -159,6 +159,8 @@ function logout() {
 // ─── 路由 ─────────────────────────────────────────────────────
 function navigate(page, params = {}) {
   closeSidebar();
+  // 离开收件箱时停止自动刷新
+  if (page !== 'inbox') clearInboxPoller();
   state.page = page;
   Object.assign(state, params);
   renderPage(page);
@@ -601,6 +603,23 @@ async function renderInbox(container) {
   const emails = await api.listEmails(mb.id);
   state.emails = emails || [];
 
+  // 启动自动刷新（每 8 秒）
+  clearInboxPoller();
+  _inboxPollerTimer = setInterval(async () => {
+    if (state.page !== 'inbox') { clearInboxPoller(); return; }
+    try {
+      const fresh = await api.listEmails(mb.id);
+      if (!fresh) return;
+      // 有新邮件才重新渲染，避免闪烁
+      if (fresh.length !== (state.emails || []).length ||
+          (fresh[0]?.id !== state.emails?.[0]?.id)) {
+        state.emails = fresh;
+        const c = $('page-content');
+        if (c) renderInbox(c);
+      }
+    } catch(e) { /* 静默失败 */ }
+  }, 8000);
+
   if (!state.emails.length) {
     container.innerHTML = `
       <div class="card">
@@ -648,6 +667,7 @@ window.openEmail = function(mbId, eid) {
 };
 
 window.refreshInbox = function() {
+  clearInboxPoller();
   renderPage('inbox');
 };
 
@@ -681,6 +701,7 @@ async function renderEmailView(container) {
   const title = $('topbar-title'); if (title) title.textContent = e.subject || '(无主题)';
   const sub   = $('topbar-subtitle'); if (sub) sub.textContent = `来自：${fromAddr}`;
 
+  // 先渲染完整 HTML（含 iframe 占位），再向 iframe 写入内容
   container.innerHTML = `
     <div class="card" style="padding:0;max-width:860px">
       <div class="email-detail-header">
@@ -693,22 +714,27 @@ async function renderEmailView(container) {
           <span>${formatDate(e.received_at)}</span>
         </div>
       </div>
-      ${htmlBody ? `
-        <iframe class="email-body-frame" id="email-frame" sandbox="allow-same-origin"></iframe>
-        <script>
-          (function(){
-            var f = document.getElementById('email-frame');
-            f.contentDocument.open();
-            f.contentDocument.write(${JSON.stringify(htmlBody)});
-            f.contentDocument.close();
-            f.onload = function(){ f.style.height = f.contentDocument.body.scrollHeight + 'px'; };
-          })();
-        <\/script>
-      ` : `
-        <div class="email-body-text">${escHtml(textBody || '(邮件内容为空)')}</div>
-      `}
+      ${htmlBody
+        ? `<iframe class="email-body-frame" id="email-frame" sandbox="allow-same-origin allow-popups"></iframe>`
+        : `<div class="email-body-text" style="white-space:pre-wrap">${escHtml(textBody || '(邮件内容为空)')}</div>`
+      }
     </div>
   `;
+
+  // innerHTML 中的 <script> 不会执行；在 DOM 就绪后直接向 iframe 写内容
+  if (htmlBody) {
+    const frame = container.querySelector('#email-frame');
+    if (frame) {
+      frame.contentDocument.open();
+      frame.contentDocument.write(htmlBody);
+      frame.contentDocument.close();
+      const setH = () => {
+        try { frame.style.height = frame.contentDocument.body.scrollHeight + 20 + 'px'; } catch (_) {}
+      };
+      frame.addEventListener('load', setH);
+      setTimeout(setH, 300);
+    }
+  }
 }
 
 // ─── 域名列表 & 指南 ─────────────────────────────────────────
@@ -1332,6 +1358,10 @@ function showModal(title, bodyHtml, onConfirm) {
 // ─── MX 自动注册（全自动验证流程）──────────────────────────
 // 轮询待验证域名状态
 let _pendingPollerTimer = null;
+let _inboxPollerTimer   = null;
+function clearInboxPoller() {
+  if (_inboxPollerTimer) { clearInterval(_inboxPollerTimer); _inboxPollerTimer = null; }
+}
 function startPendingDomainPoller(ids) {
   if (!ids || ids.length === 0) return;
   clearInterval(_pendingPollerTimer);
