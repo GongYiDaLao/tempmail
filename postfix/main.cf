@@ -1,69 +1,29 @@
 # ============================================================
-# Postfix 主配置文件 - 仅收件模式
+# Postfix 主配置文件 - 仅收件模式（高并发优化版）
 # ============================================================
-# 重要说明：
-#   ⚠️  本文件中的 myhostname / mydomain 是 Docker 构建时的默认值。
-#   运行时，postfix/entrypoint.sh 会用 SMTP_HOSTNAME 环境变量
-#   自动覆盖 myhostname，所以无需手动修改本文件的主机名配置。
-#
-#   【真正需要修改的是 .env 文件中的 SMTP_HOSTNAME 和 SMTP_SERVER_IP】
-#
-# ============================================================
-# 【端口联动说明】
-# ============================================================
-# Postfix SMTP 端口默认 25（在 master.cf 中定义，见下方说明）。
-# ⚠️  如果需要修改 SMTP 端口：
-#   - 修改 postfix/master.cf 第一行（smtp inet ...）改为新端口名
-#   - 同步修改 docker-compose.yml → postfix.ports 右边的数字
-#   注意：绝大多数邮件服务器只向 25 端口发信，改端口会导致收不到邮件！
-#
-# ============================================================
-# 【主机名联动说明】
-# ============================================================
-# myhostname / mydomain 被以下地方引用：
-#   - SMTP 握手时的 banner（220 myhostname ESMTP）
-#   - 反垃圾邮件检查（部分发件方会反查 PTR 记录）
-#   - postfix/entrypoint.sh 中会用 SMTP_HOSTNAME 环境变量覆盖本值
-# 建议：
-#   1. 设置 .env 中的 SMTP_HOSTNAME（运行时自动覆盖，无需改本文件）
-#   2. 在 DNS 添加 PTR 反向解析：IP → SMTP_HOSTNAME（减少被标记为垃圾邮件）
+# 注意：本文件 myhostname/mydomain 在运行时被 entrypoint.sh 覆盖
+# 真正需要修改的是 .env 中的 SMTP_HOSTNAME / SMTP_SERVER_IP
 # ============================================================
 smtpd_banner = $myhostname ESMTP
 biff = no
 append_dot_mydomain = no
-
-# TLS 配置（当前禁用，如需启用 TLS 收件参考 Postfix TLS 文档）
 smtpd_use_tls = no
 
-# ── 基本主机名配置 ────────────────────────────────────────────
-# ⚠️  以下两行在运行时会被 entrypoint.sh 用环境变量覆盖，无需手动修改。
-#     如果不使用 Docker（直接运行），才需要手动修改为实际值。
-# 实际值来自 .env → SMTP_HOSTNAME
+# ── 基本主机名（运行时由 entrypoint.sh 用环境变量覆盖）──────────
 myhostname = mail.example.com
-# 实际值为 SMTP_HOSTNAME 去掉第一段（mail.xxx.com → xxx.com）
 mydomain   = example.com
 myorigin   = $mydomain
-# 监听所有网络接口（容器内必须为 all）
 inet_interfaces = all
-# 仅使用 IPv4（没有 IPv6 地址时保持此配置）
 inet_protocols = ipv4
 
 # ── 收件模式：禁用本地投递和中继 ─────────────────────────────
-# 以下配置确保 Postfix 只收件，不向外转发（防止被用作垃圾邮件中继）
-# 不接受本机账户投递
 mydestination  =
-# 不中继任何域名
 relay_domains  =
-# 禁用本地投递
 local_transport = error:local delivery disabled
-# 禁用本地收件人查询
 local_recipient_maps =
 
 # ── 虚拟域名收件配置 ─────────────────────────────────────────
-# virtual_domains 文件由 entrypoint.sh 定期从 API 同步（每 60 秒）
-# 所有在 TempMail 平台激活的域名都会写入此文件
 virtual_mailbox_domains = hash:/etc/postfix/virtual_domains
-# 所有收到的邮件都通过 mailreceiver transport 处理（定义在 master.cf）
 virtual_transport = mailreceiver:
 
 # ── 反垃圾邮件限制 ───────────────────────────────────────────
@@ -71,22 +31,26 @@ smtpd_recipient_restrictions =
     permit_mynetworks,
     reject_unauth_destination
 
-# ── 性能调优参数 ─────────────────────────────────────────────
-# 单个客户端最大同时连接数
-smtpd_client_connection_count_limit = 50
-# 单个客户端每秒最大连接次数
-smtpd_client_connection_rate_limit  = 100
-# Postfix 总进程数上限
-default_process_limit               = 100
-# 邮件在队列中最长等待时间
-maximal_queue_lifetime              = 1d
-# 退信在队列中最长等待时间
-bounce_queue_lifetime               = 1d
-# 单封邮件最大体积（字节）= 10MB
-message_size_limit                  = 10240000
+# ── 高并发核心参数 ────────────────────────────────────────────
+# 单个客户端最大同时连接数：0 = 不限制
+# 注册机场景下发件方 IP 集中，限制会直接卡死收件
+smtpd_client_connection_count_limit = 0
 
-# ── 并发投递参数 ─────────────────────────────────────────────
-# 向单个目标域并发投递数
-smtp_destination_concurrency_limit     = 20
-# 默认并发投递数
-default_destination_concurrency_limit  = 50
+# 单个客户端每秒连接速率：0 = 不限制
+smtpd_client_connection_rate_limit  = 0
+
+# Postfix 总进程数上限，设为 1000 足以应对高并发
+# smtp(0不限) + mailreceiver(0不限) + 内部进程 ~20，留足余量
+default_process_limit = 1000
+
+# ── 消息大小 ──────────────────────────────────────────────────
+message_size_limit = 10240000
+
+# 关闭 stress 模式下的超时压缩
+smtpd_timeout = 300s
+
+# ── 队列参数：注册机场景时效性要求高，失败后快速重试 ──────────
+maximal_queue_lifetime  = 1h
+bounce_queue_lifetime   = 1h
+minimal_backoff_time    = 10s
+maximal_backoff_time    = 60s

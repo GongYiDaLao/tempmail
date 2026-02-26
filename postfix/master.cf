@@ -31,9 +31,8 @@
 # ============================================================
 
 # ── 标准 SMTP 服务（收件端口 25）────────────────────────────
-# ⚠️  "smtp" 对应系统标准 25 端口（/etc/services 中定义）
-#     如需修改端口，将 smtp 改为数字（如 2525），并同步修改 docker-compose.yml
-smtp      inet  n       -       n       -       100     smtpd
+# maxproc=0 表示不限制并发 smtpd 进程数，由 default_process_limit 统一管控
+smtp      inet  n       -       n       -       0       smtpd
 
 # ── 内部处理服务（保持默认，无需修改）─────────────────────────
 pickup    unix  n       -       n       60      1       pickup    # 从 maildrop 队列取件
@@ -60,23 +59,8 @@ scache    unix  -       -       n       -       1       scache    # 会话缓存
 postlog   unix-dgram n  -       n       -       1       postlogd  # 日志服务
 
 # ── mailreceiver：核心投递管道（将邮件传递给 Go API）────────────
-# ⚠️  这是本系统最重要的配置！
-#
-# 工作流程：
-#   外部邮件 → Postfix(25端口) → mailreceiver transport
-#           → 调用 /usr/local/bin/mail-receiver ${recipient}
-#           → mail-receiver.py 解析 MIME
-#           → HTTP POST 到 http://api:8080/internal/deliver
-#           → Go API 写入数据库
-#
-# 参数说明：
-#   flags=DRhu  D=不在 From 行加转义 R=添加 Return-Path 头
-#               h=地址转小写 u=用户名转小写
-#   user=nobody 以低权限用户运行（安全最佳实践）
-#   maxproc=50  最多同时处理 50 封邮件（高并发时可适当调大）
-#   argv=...    实际调用的命令（${recipient} 由 Postfix 自动替换为收件地址）
-#
-# ⚠️  如果修改了 API 端口，请修改 postfix/entrypoint.sh（非本文件）
-#     因为 mail-receiver.py 通过 API_URL 环境变量读取地址
-mailreceiver unix -       n       n       -       50      pipe
+# maxproc=0 不限制并发 pipe 进程，让 Postfix 按队列深度自动扩展
+# 每封邮件 fork 一个 Python 进程，API 响应后立即退出
+# flags=DRhu: D=不转义From行 R=加Return-Path头 h=域名转小写 u=本地部分转小写
+mailreceiver unix -       n       n       -       0       pipe
   flags=DRhu user=nobody argv=/usr/local/bin/mail-receiver ${recipient}
