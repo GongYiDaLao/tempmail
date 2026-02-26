@@ -539,13 +539,71 @@ window.openInbox = function(id, addr) {
 };
 
 window.createMailbox = async function() {
+  // 拉取活跃域名列表，构建选择弹窗
+  let activeDomains = [];
   try {
-    const mb = await api.createMailbox();
-    toast(`已创建：${mb.full_address}`, 'success');
-    navigate('dashboard');
-  } catch(e) {
-    toast('创建失败：' + e.message, 'error');
-  }
+    const all = await api.domains();
+    activeDomains = (all || []).filter(d => d.is_active);
+  } catch(e) { /* 获取失败时退化为随机域名 */ }
+
+  const old = document.querySelector('.modal-overlay');
+  if (old) old.remove();
+  const overlay = el('div', 'modal-overlay');
+
+  const domainOptions = activeDomains.map(d =>
+    `<option value="${escHtml(d.domain)}">${escHtml(d.domain)}</option>`
+  ).join('');
+
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:420px">
+      <div class="modal-title">+ 新建临时邮箱</div>
+      <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">✕</button>
+      <div class="form-group" style="margin-top:0.8rem">
+        <label class="form-label">本地部分（@ 之前）</label>
+        <input class="form-input" id="mb-address" placeholder="留空则随机生成" autocomplete="off" />
+        <div class="form-hint">只允许字母、数字、连字符、下划线</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">域名</label>
+        <select class="form-input" id="mb-domain">
+          <option value="">随机选取</option>
+          ${domainOptions}
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">取消</button>
+        <button class="btn btn-primary" id="mb-confirm-btn">创建</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+  // 回车确认
+  overlay.querySelector('#mb-address').addEventListener('keydown', e => {
+    if (e.key === 'Enter') overlay.querySelector('#mb-confirm-btn').click();
+  });
+
+  overlay.querySelector('#mb-confirm-btn').addEventListener('click', async () => {
+    const btn     = overlay.querySelector('#mb-confirm-btn');
+    const address = overlay.querySelector('#mb-address').value.trim();
+    const domain  = overlay.querySelector('#mb-domain').value;
+    btn.disabled  = true;
+    btn.textContent = '创建中...';
+    try {
+      const body = {};
+      if (address) body.address = address;
+      if (domain)  body.domain  = domain;
+      const mb = await api.createMailbox(body);
+      overlay.remove();
+      toast(`已创建：${mb.full_address}`, 'success');
+      navigate('dashboard');
+    } catch(e) {
+      btn.disabled = false;
+      btn.textContent = '创建';
+      toast('创建失败：' + e.message, 'error');
+    }
+  });
 };
 
 window.confirmDeleteMailbox = function(id, addr) {
@@ -1523,18 +1581,35 @@ curl "${base}/api/me?api_key=${key}"`,
     },
     {
       title: '📫 1. 创建临时邮箱',
-      desc: 'POST /api/mailboxes — 随机生成一个临时邮箱，30 分钟后自动删除',
-      code: `# 随机地址创建
+      desc: 'POST /api/mailboxes — address 和 domain 均为可选字段',
+      code: `# 随机地址 + 随机域名
 curl -s -X POST ${base}/api/mailboxes \\
   -H "Authorization: Bearer ${key}" \\
   -H "Content-Type: application/json" \\
   -d '{}'
 
-# 指定前缀创建
+# 指定本地部分（@ 之前），域名随机
 curl -s -X POST ${base}/api/mailboxes \\
   -H "Authorization: Bearer ${key}" \\
   -H "Content-Type: application/json" \\
-  -d '{"address": "mytestbox"}'`,
+  -d '{"address": "mytestbox"}'
+
+# 指定域名，地址随机（domain 须是已激活域名）
+curl -s -X POST ${base}/api/mailboxes \\
+  -H "Authorization: Bearer ${key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"domain": "example.com"}'
+
+# 同时指定地址和域名
+curl -s -X POST ${base}/api/mailboxes \\
+  -H "Authorization: Bearer ${key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"address": "mytestbox", "domain": "example.com"}'
+
+# 错误码：
+#   400 → domain 不存在或未激活
+#   409 → 地址已被占用（换一个 address 或留空让系统随机生成）
+#   503 → 系统内无可用域名`,
     },
     {
       title: '📌 2. 获取邮箱列表',

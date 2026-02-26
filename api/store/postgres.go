@@ -181,6 +181,20 @@ func (s *Store) GetRandomActiveDomain(ctx context.Context) (*model.Domain, error
 	return &d, nil
 }
 
+// GetDomainByName 按域名字符串查找活跃域名，供创建邮箱时指定域名使用
+func (s *Store) GetDomainByName(ctx context.Context, domain string) (*model.Domain, error) {
+	var d model.Domain
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, domain, is_active, status, created_at, mx_checked_at
+		 FROM domains WHERE domain = $1 AND is_active = TRUE`,
+		strings.ToLower(domain),
+	).Scan(&d.ID, &d.Domain, &d.IsActive, &d.Status, &d.CreatedAt, &d.MxCheckedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
 func (s *Store) GetDomainByID(ctx context.Context, domainID int) (*model.Domain, error) {
 	var d model.Domain
 	err := s.pool.QueryRow(ctx,

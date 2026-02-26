@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"tempmail/middleware"
+	"tempmail/model"
 	"tempmail/store"
 
 	"github.com/gin-gonic/gin"
@@ -20,16 +21,19 @@ func NewMailboxHandler(s *store.Store) *MailboxHandler {
 	return &MailboxHandler{store: s}
 }
 
-// POST /api/mailboxes - 创建临时邮箱（随机域名）
+// POST /api/mailboxes - 创建临时邮箱
+// 请求体字段均为可选：
+//   address — 本地部分（@ 前），为空则随机生成
+//   domain  — 指定域名（须是已激活域名），为空则随机选取
 func (h *MailboxHandler) Create(c *gin.Context) {
 	account := middleware.GetAccount(c)
 
 	var req struct {
-		Address string `json:"address"` // 可选，为空则随机生成
+		Address string `json:"address"`
+		Domain  string `json:"domain"`
 	}
 	c.ShouldBindJSON(&req)
 
-	// 生成邮箱地址
 	address := strings.TrimSpace(req.Address)
 	if address == "" {
 		address = store.GenerateRandomAddress()
@@ -44,16 +48,27 @@ func (h *MailboxHandler) Create(c *gin.Context) {
 		}
 	}
 
-	// 从域名池随机选择一个活跃域名
-	domain, err := h.store.GetRandomActiveDomain(c.Request.Context())
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active domains available"})
-		return
+	// 确定域名：指定 or 随机
+	var domainRecord *model.Domain
+	if d := strings.TrimSpace(strings.ToLower(req.Domain)); d != "" {
+		found, err := h.store.GetDomainByName(c.Request.Context(), d)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "domain not found or not active: " + d})
+			return
+		}
+		domainRecord = found
+	} else {
+		found, err := h.store.GetRandomActiveDomain(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active domains available"})
+			return
+		}
+		domainRecord = found
 	}
 
-	fullAddress := fmt.Sprintf("%s@%s", address, domain.Domain)
+	fullAddress := fmt.Sprintf("%s@%s", address, domainRecord.Domain)
 
-	mailbox, err := h.store.CreateMailbox(c.Request.Context(), account.ID, address, domain.ID, fullAddress, ttlMinutes)
+	mailbox, err := h.store.CreateMailbox(c.Request.Context(), account.ID, address, domainRecord.ID, fullAddress, ttlMinutes)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 			c.JSON(http.StatusConflict, gin.H{"error": "address already taken, try again"})
