@@ -26,13 +26,16 @@ CREATE INDEX idx_accounts_api_key ON accounts (api_key);
 -- 2. 域名池表 (domains)
 -- ============================================================
 CREATE TABLE domains (
-    id          SERIAL PRIMARY KEY,
-    domain      VARCHAR(255) NOT NULL UNIQUE,
-    is_active   BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    id            SERIAL PRIMARY KEY,
+    domain        VARCHAR(255) NOT NULL UNIQUE,
+    is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
+    status        VARCHAR(16)  NOT NULL DEFAULT 'active',  -- active / pending / disabled
+    mx_checked_at TIMESTAMPTZ,                             -- 最近一次 MX 检测时间
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_domains_active ON domains (is_active) WHERE is_active = TRUE;
+CREATE INDEX idx_domains_status ON domains (status) WHERE status = 'pending';
 
 -- ============================================================
 -- 3. 邮箱表 (mailboxes)

@@ -35,6 +35,12 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.HealthCheckPeriod = 30 * time.Second
 
+	// PgBouncer transaction 模式不支持 named prepared statements。
+	// pgx v5 默认使用 QueryExecModeCacheStatement（会发送 Parse/Bind/Execute），
+	// 多个连接复用同一个后端连接时会触发 "prepared statement already in use"。
+	// 改为 SimpleProtocol：直接发送明文 SQL，完全绕过服务端 prepared statement 机制。
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect db: %w", err)
