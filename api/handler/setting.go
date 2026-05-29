@@ -35,10 +35,15 @@ func (h *SettingHandler) GetPublic(c *gin.Context) {
 	if err != nil {
 		linuxDOLogin = "false"
 	}
+	gitHubLogin, err := h.store.GetSetting(c.Request.Context(), "github_login_enabled")
+	if err != nil {
+		gitHubLogin = "false"
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"registration_open":     regOpen == "true",
 		"key_login_enabled":     keyLogin != "false",
 		"linuxdo_login_enabled": linuxDOLogin == "true",
+		"github_login_enabled":  gitHubLogin == "true",
 		"site_title":            siteTitle,
 		"site_logo_url":         siteLogoURL,
 		"smtp_server_ip":        smtpIP,
@@ -59,6 +64,12 @@ func (h *SettingHandler) AdminGetAll(c *gin.Context) {
 		settings["linuxdo_client_secret"] = ""
 	} else {
 		settings["linuxdo_client_secret_set"] = "false"
+	}
+	if secret := settings["github_client_secret"]; secret != "" {
+		settings["github_client_secret_set"] = "true"
+		settings["github_client_secret"] = ""
+	} else {
+		settings["github_client_secret_set"] = "false"
 	}
 	c.JSON(http.StatusOK, settings)
 }
@@ -88,6 +99,10 @@ func (h *SettingHandler) AdminUpdate(c *gin.Context) {
 		"linuxdo_client_id":      true,
 		"linuxdo_client_secret":  true,
 		"linuxdo_redirect_url":   true,
+		"github_login_enabled":   true,
+		"github_client_id":       true,
+		"github_client_secret":   true,
+		"github_redirect_url":    true,
 	}
 
 	for k, v := range req {
@@ -95,7 +110,7 @@ func (h *SettingHandler) AdminUpdate(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown setting key: " + k})
 			return
 		}
-		if k == "linuxdo_client_secret" && v == "" {
+		if (k == "linuxdo_client_secret" || k == "github_client_secret") && v == "" {
 			continue
 		}
 		if err := h.store.SetSetting(c.Request.Context(), k, v); err != nil {

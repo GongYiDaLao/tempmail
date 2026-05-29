@@ -306,11 +306,14 @@ function buildAuthPage() {
 function renderAuthTabs() {
   const keyLogin = state.settings.key_login_enabled !== false;
   const linuxDOLogin = state.settings.linuxdo_login_enabled === true;
+  const gitHubLogin = state.settings.github_login_enabled === true;
   const loginTab = $('tab-login');
   if (loginTab) loginTab.style.display = keyLogin ? '' : 'none';
   if (!keyLogin && $('tab-login')?.classList.contains('active')) renderLoginForm();
   const linuxDOButton = $('btn-linuxdo-login');
   if (linuxDOButton) linuxDOButton.style.display = linuxDOLogin ? '' : 'none';
+  const gitHubButton = $('btn-github-login');
+  if (gitHubButton) gitHubButton.style.display = gitHubLogin ? '' : 'none';
 }
 
 window.switchAuthTab = function(t) {
@@ -329,7 +332,9 @@ function renderLoginForm() {
   if (!area) return;
   const keyLogin = state.settings.key_login_enabled !== false;
   const linuxDOLogin = state.settings.linuxdo_login_enabled === true;
-  const showKeyLogin = keyLogin || linuxDOLogin;
+  const gitHubLogin = state.settings.github_login_enabled === true;
+  const oauthLogin = linuxDOLogin || gitHubLogin;
+  const showKeyLogin = keyLogin || oauthLogin;
   area.innerHTML = `
     ${showKeyLogin ? `
     <div class="form-group">
@@ -339,9 +344,14 @@ function renderLoginForm() {
     </div>
     <button class="btn btn-primary" style="width:100%" onclick="doLogin()">登 录</button>
     ` : ''}
-    ${showKeyLogin && linuxDOLogin ? '<div class="divider">或</div>' : ''}
-    ${linuxDOLogin ? `<button class="btn btn-primary" id="btn-linuxdo-login" style="width:100%" onclick="loginWithLinuxDO()">使用 Linux DO Connect 登录</button>` : ''}
-    ${!showKeyLogin && !linuxDOLogin ? `<div style="text-align:center;color:var(--text-muted);line-height:1.8">当前没有启用任何登录方式，请联系管理员。</div>` : ''}
+    ${showKeyLogin && oauthLogin ? '<div class="divider">或</div>' : ''}
+    ${oauthLogin ? `
+      <div style="display:flex;flex-direction:column;gap:0.6rem">
+        ${linuxDOLogin ? `<button class="btn btn-primary" id="btn-linuxdo-login" style="width:100%" onclick="loginWithLinuxDO()">使用 Linux DO Connect 登录</button>` : ''}
+        ${gitHubLogin ? `<button class="btn btn-primary" id="btn-github-login" style="width:100%" onclick="loginWithGitHub()">使用 GitHub 登录</button>` : ''}
+      </div>
+    ` : ''}
+    ${!showKeyLogin && !oauthLogin ? `<div style="text-align:center;color:var(--text-muted);line-height:1.8">当前没有启用任何登录方式，请联系管理员。</div>` : ''}
     <div class="divider"></div>
     <div style="text-align:center;font-size:0.78rem;color:var(--text-muted)">
       没有账户？联系管理员创建，或点击上方"注册账户"
@@ -375,6 +385,10 @@ window.doLogin = async function() {
 
 window.loginWithLinuxDO = function() {
   window.location.href = PUBLIC_BASE + '/auth/linuxdo';
+};
+
+window.loginWithGitHub = function() {
+  window.location.href = PUBLIC_BASE + '/auth/github';
 };
 
 window.doRegister = async function() {
@@ -1398,6 +1412,7 @@ async function renderAdminSettings(container) {
   const regOpen    = settings.registration_open === 'true' || settings.registration_open === true;
   const keyLogin   = settings.key_login_enabled !== 'false' && settings.key_login_enabled !== false;
   const linuxDOLogin = settings.linuxdo_login_enabled === 'true' || settings.linuxdo_login_enabled === true;
+  const gitHubLogin = settings.github_login_enabled === 'true' || settings.github_login_enabled === true;
   const smtpIp      = settings.smtp_server_ip       || '';
   const smtpHostname = settings.smtp_hostname         || '';
   const siteTitle  = settings.site_title            || 'TempMail';
@@ -1409,6 +1424,9 @@ async function renderAdminSettings(container) {
   const linuxDOClientID = settings.linuxdo_client_id || '';
   const linuxDOSecretSet = settings.linuxdo_client_secret_set === 'true' || settings.linuxdo_client_secret_set === true;
   const linuxDORedirectURL = settings.linuxdo_redirect_url || `${window.location.origin}/public/auth/linuxdo/callback`;
+  const gitHubClientID = settings.github_client_id || '';
+  const gitHubSecretSet = settings.github_client_secret_set === 'true' || settings.github_client_secret_set === true;
+  const gitHubRedirectURL = settings.github_redirect_url || `${window.location.origin}/public/auth/github/callback`;
 
   function inputRow(id, label, value, hint, placeholder = '', settingKey = '') {
     const key = settingKey || id.replace(/^input-/, '').replace(/-/g, '_');
@@ -1462,6 +1480,16 @@ async function renderAdminSettings(container) {
             <span class="toggle-desc">需同时配置 LINUXDO_CLIENT_ID、LINUXDO_CLIENT_SECRET、LINUXDO_REDIRECT_URL 环境变量</span>
           </div>
         </div>
+        <div class="toggle-wrap" style="margin-bottom:0.5rem">
+          <label class="toggle">
+            <input type="checkbox" id="toggle-github-login" ${gitHubLogin ? 'checked' : ''} onchange="saveLoginSetting('github_login_enabled', this.checked, 'GitHub 登录')">
+            <span class="toggle-slider"></span>
+          </label>
+          <div>
+            <div class="toggle-label">启用 GitHub 登录</div>
+            <span class="toggle-desc">需同时配置 GitHub OAuth App 的 Client ID、Client Secret 与回调地址</span>
+          </div>
+        </div>
         <div class="divider"></div>
 
         <div class="form-group">
@@ -1486,6 +1514,31 @@ async function renderAdminSettings(container) {
             <button class="btn btn-primary btn-sm" onclick="saveSetting('input-linuxdo-redirect-url','linuxdo_redirect_url')">✓ 保存</button>
           </div>
           <div class="form-hint">需要与 Connect.Linux.Do 应用后台配置的回调地址完全一致。</div>
+        </div>
+        <div class="divider"></div>
+
+        <div class="form-group">
+          <label class="form-label">GitHub Client ID</label>
+          <div style="display:flex;gap:0.5rem">
+            <input class="form-input" id="input-github-client-id" value="${escHtml(gitHubClientID)}" placeholder="Client ID" style="flex:1" />
+            <button class="btn btn-primary btn-sm" onclick="saveSetting('input-github-client-id','github_client_id')">✓ 保存</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">GitHub Client Secret</label>
+          <div style="display:flex;gap:0.5rem">
+            <input class="form-input" id="input-github-client-secret" type="password" value="" placeholder="${gitHubSecretSet ? '已配置，留空不修改' : 'Client Secret'}" style="flex:1" autocomplete="new-password" />
+            <button class="btn btn-primary btn-sm" onclick="saveSetting('input-github-client-secret','github_client_secret')">✓ 保存</button>
+          </div>
+          <div class="form-hint">${gitHubSecretSet ? 'Client Secret 已配置。出于安全原因不会回显，留空保存不会覆盖。' : 'Client Secret 只保存在后端数据库，不会通过公开配置下发。'}</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">GitHub 回调地址</label>
+          <div style="display:flex;gap:0.5rem">
+            <input class="form-input" id="input-github-redirect-url" value="${escHtml(gitHubRedirectURL)}" placeholder="https://your-domain.com/public/auth/github/callback" style="flex:1" />
+            <button class="btn btn-primary btn-sm" onclick="saveSetting('input-github-redirect-url','github_redirect_url')">✓ 保存</button>
+          </div>
+          <div class="form-hint">需要与 GitHub OAuth App 后台的 Authorization callback URL 完全一致。</div>
         </div>
         <div class="divider"></div>
 
@@ -1556,7 +1609,7 @@ async function renderAdminSettings(container) {
 window.saveSetting = async function(inputId, settingKey) {
   const el2 = document.getElementById(inputId);
   const val = el2 ? (el2.tagName === 'TEXTAREA' ? el2.value : el2.value.trim()) : '';
-  if (settingKey === 'linuxdo_client_secret' && !val) {
+  if ((settingKey === 'linuxdo_client_secret' || settingKey === 'github_client_secret') && !val) {
     toast('Client Secret 留空，未修改', 'info');
     return;
   }
@@ -1586,7 +1639,12 @@ window.saveLoginSetting = async function(key, enabled, label) {
     toast(`${label}已${enabled ? '开启' : '关闭'}`, 'success');
   } catch(e) {
     toast('保存失败: ' + e.message, 'error');
-    const cb = key === 'key_login_enabled' ? $('toggle-key-login') : $('toggle-linuxdo-login');
+    const cbMap = {
+      key_login_enabled: 'toggle-key-login',
+      linuxdo_login_enabled: 'toggle-linuxdo-login',
+      github_login_enabled: 'toggle-github-login',
+    };
+    const cb = $(cbMap[key]);
     if (cb) cb.checked = !enabled;
   }
 };

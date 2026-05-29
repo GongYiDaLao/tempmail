@@ -77,6 +77,7 @@ func main() {
 	registerH := handler.NewRegisterHandler(db)
 	statsH := handler.NewStatsHandler(db)
 	linuxDOH := handler.NewLinuxDOHandler(db, cfg.LinuxDOClientID, cfg.LinuxDOClientSecret, cfg.LinuxDORedirectURL)
+	gitHubH := handler.NewGitHubHandler(db, cfg.GitHubClientID, cfg.GitHubClientSecret, cfg.GitHubRedirectURL)
 
 	// 公开路由（无需认证）
 	public := r.Group("/public")
@@ -87,6 +88,8 @@ func main() {
 		public.GET("/stats", statsH.Get)
 		public.GET("/auth/linuxdo", linuxDOH.Start)
 		public.GET("/auth/linuxdo/callback", linuxDOH.Callback)
+		public.GET("/auth/github", gitHubH.Start)
+		public.GET("/auth/github/callback", gitHubH.Callback)
 	}
 
 	// API 路由组（需要认证 + 速率限制）

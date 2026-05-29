@@ -145,6 +145,37 @@ func (s *Store) GetOrCreateLinuxDOAccount(ctx context.Context, linuxDOID, userna
 	return nil, errors.New("failed to create Linux DO account")
 }
 
+func (s *Store) GetOrCreateGitHubAccount(ctx context.Context, gitHubID, username string) (*model.Account, error) {
+	var a model.Account
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, username, api_key, COALESCE(linuxdo_id, ''), is_admin, is_active, created_at, updated_at
+		 FROM accounts WHERE github_id = $1 AND is_active = TRUE`, gitHubID,
+	).Scan(&a.ID, &a.Username, &a.APIKey, &a.LinuxDOID, &a.IsAdmin, &a.IsActive, &a.CreatedAt, &a.UpdatedAt)
+	if err == nil {
+		return &a, nil
+	}
+	if err != pgx.ErrNoRows {
+		return nil, err
+	}
+
+	apiKey := generateAPIKey()
+	for i := 0; i < 5; i++ {
+		name := username
+		if i > 0 {
+			name = fmt.Sprintf("%s_%d", username, i+1)
+		}
+		err = s.pool.QueryRow(ctx,
+			`INSERT INTO accounts (username, api_key, github_id) VALUES ($1, $2, $3)
+			 RETURNING id, username, api_key, COALESCE(linuxdo_id, ''), is_admin, is_active, created_at, updated_at`,
+			name, apiKey, gitHubID,
+		).Scan(&a.ID, &a.Username, &a.APIKey, &a.LinuxDOID, &a.IsAdmin, &a.IsActive, &a.CreatedAt, &a.UpdatedAt)
+		if err == nil {
+			return &a, nil
+		}
+	}
+	return nil, errors.New("failed to create GitHub account")
+}
+
 func (s *Store) CreateAccount(ctx context.Context, username string) (*model.Account, error) {
 	apiKey := generateAPIKey()
 	var a model.Account

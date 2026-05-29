@@ -1,12 +1,9 @@
 package handler
 
 import (
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -19,13 +16,13 @@ import (
 )
 
 const (
-	linuxDOAuthURL     = "https://connect.linux.do/oauth2/authorize"
-	linuxDOTokenURL    = "https://connect.linux.do/oauth2/token"
-	linuxDOUserInfoURL = "https://connect.linux.do/api/user"
-	linuxDOStateCookie = "tm_linuxdo_state"
+	gitHubAuthURL     = "https://github.com/login/oauth/authorize"
+	gitHubTokenURL    = "https://github.com/login/oauth/access_token"
+	gitHubUserInfoURL = "https://api.github.com/user"
+	gitHubStateCookie = "tm_github_state"
 )
 
-type LinuxDOHandler struct {
+type GitHubHandler struct {
 	store           *store.Store
 	envClientID     string
 	envClientSecret string
@@ -33,8 +30,8 @@ type LinuxDOHandler struct {
 	httpClient      *http.Client
 }
 
-func NewLinuxDOHandler(s *store.Store, clientID, clientSecret, redirectURL string) *LinuxDOHandler {
-	return &LinuxDOHandler{
+func NewGitHubHandler(s *store.Store, clientID, clientSecret, redirectURL string) *GitHubHandler {
+	return &GitHubHandler{
 		store:           s,
 		envClientID:     clientID,
 		envClientSecret: clientSecret,
@@ -43,14 +40,14 @@ func NewLinuxDOHandler(s *store.Store, clientID, clientSecret, redirectURL strin
 	}
 }
 
-func (h *LinuxDOHandler) Start(c *gin.Context) {
+func (h *GitHubHandler) Start(c *gin.Context) {
 	if !h.loginEnabled(c) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Linux DO login is disabled"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "GitHub login is disabled"})
 		return
 	}
 	cfg := h.oauthConfig(c)
 	if cfg.clientID == "" || cfg.clientSecret == "" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Linux DO OAuth config is incomplete"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "GitHub OAuth config is incomplete"})
 		return
 	}
 	state, err := randomState()
@@ -59,35 +56,40 @@ func (h *LinuxDOHandler) Start(c *gin.Context) {
 		return
 	}
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie(linuxDOStateCookie, state, 600, "/", "", false, true)
+	c.SetCookie(gitHubStateCookie, state, 600, "/", "", false, true)
 
 	q := url.Values{}
 	q.Set("client_id", cfg.clientID)
 	q.Set("redirect_uri", cfg.redirectURL)
 	q.Set("response_type", "code")
-	q.Set("scope", "user")
+	q.Set("scope", "read:user")
 	q.Set("state", state)
-	c.Redirect(http.StatusFound, linuxDOAuthURL+"?"+q.Encode())
+	q.Set("allow_signup", "true")
+	c.Redirect(http.StatusFound, gitHubAuthURL+"?"+q.Encode())
 }
 
-func (h *LinuxDOHandler) Callback(c *gin.Context) {
+func (h *GitHubHandler) Callback(c *gin.Context) {
 	if !h.loginEnabled(c) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Linux DO login is disabled"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "GitHub login is disabled"})
 		return
 	}
 	cfg := h.oauthConfig(c)
 	if cfg.clientID == "" || cfg.clientSecret == "" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Linux DO OAuth config is incomplete"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "GitHub OAuth config is incomplete"})
 		return
 	}
 	state := c.Query("state")
-	cookieState, err := c.Cookie(linuxDOStateCookie)
+	cookieState, err := c.Cookie(gitHubStateCookie)
 	if err != nil || state == "" || subtle.ConstantTimeCompare([]byte(state), []byte(cookieState)) != 1 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid oauth state"})
 		return
 	}
-	c.SetCookie(linuxDOStateCookie, "", -1, "/", "", false, true)
+	c.SetCookie(gitHubStateCookie, "", -1, "/", "", false, true)
 
+	if oauthErr := c.Query("error"); oauthErr != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "GitHub OAuth error: " + oauthErr})
+		return
+	}
 	code := c.Query("code")
 	if code == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing oauth code"})
@@ -104,14 +106,14 @@ func (h *LinuxDOHandler) Callback(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	linuxDOID := profile.IDString()
-	if linuxDOID == "" {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Linux DO profile missing id"})
+	gitHubID := profile.IDString()
+	if gitHubID == "" {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "GitHub profile missing id"})
 		return
 	}
 
-	username := linuxDOUsername(profile)
-	account, err := h.store.GetOrCreateLinuxDOAccount(c.Request.Context(), linuxDOID, username)
+	username := gitHubUsername(profile)
+	account, err := h.store.GetOrCreateGitHubAccount(c.Request.Context(), gitHubID, username)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -132,21 +134,21 @@ location.replace('/');
 </script></body></html>`, string(apiKeyJSON), string(accountJSON)))
 }
 
-func (h *LinuxDOHandler) loginEnabled(c *gin.Context) bool {
-	enabled, err := h.store.GetSetting(c.Request.Context(), "linuxdo_login_enabled")
+func (h *GitHubHandler) loginEnabled(c *gin.Context) bool {
+	enabled, err := h.store.GetSetting(c.Request.Context(), "github_login_enabled")
 	return err == nil && enabled == "true"
 }
 
-type linuxDOOAuthConfig struct {
+type gitHubOAuthConfig struct {
 	clientID     string
 	clientSecret string
 	redirectURL  string
 }
 
-func (h *LinuxDOHandler) oauthConfig(c *gin.Context) linuxDOOAuthConfig {
-	clientID, _ := h.store.GetSetting(c.Request.Context(), "linuxdo_client_id")
-	clientSecret, _ := h.store.GetSetting(c.Request.Context(), "linuxdo_client_secret")
-	redirectURL, _ := h.store.GetSetting(c.Request.Context(), "linuxdo_redirect_url")
+func (h *GitHubHandler) oauthConfig(c *gin.Context) gitHubOAuthConfig {
+	clientID, _ := h.store.GetSetting(c.Request.Context(), "github_client_id")
+	clientSecret, _ := h.store.GetSetting(c.Request.Context(), "github_client_secret")
+	redirectURL, _ := h.store.GetSetting(c.Request.Context(), "github_redirect_url")
 	if clientID == "" {
 		clientID = h.envClientID
 	}
@@ -157,28 +159,12 @@ func (h *LinuxDOHandler) oauthConfig(c *gin.Context) linuxDOOAuthConfig {
 		redirectURL = h.envRedirectURL
 	}
 	if redirectURL == "" {
-		redirectURL = requestBaseURL(c) + "/public/auth/linuxdo/callback"
+		redirectURL = requestBaseURL(c) + "/public/auth/github/callback"
 	}
-	return linuxDOOAuthConfig{clientID: clientID, clientSecret: clientSecret, redirectURL: redirectURL}
+	return gitHubOAuthConfig{clientID: clientID, clientSecret: clientSecret, redirectURL: redirectURL}
 }
 
-func requestBaseURL(c *gin.Context) string {
-	scheme := c.GetHeader("X-Forwarded-Proto")
-	if scheme == "" {
-		if c.Request.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
-	}
-	host := c.GetHeader("X-Forwarded-Host")
-	if host == "" {
-		host = c.Request.Host
-	}
-	return scheme + "://" + host
-}
-
-func (h *LinuxDOHandler) exchangeCode(code string, cfg linuxDOOAuthConfig) (string, error) {
+func (h *GitHubHandler) exchangeCode(code string, cfg gitHubOAuthConfig) (string, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
@@ -186,12 +172,13 @@ func (h *LinuxDOHandler) exchangeCode(code string, cfg linuxDOOAuthConfig) (stri
 	form.Set("client_id", cfg.clientID)
 	form.Set("client_secret", cfg.clientSecret)
 
-	req, err := http.NewRequest(http.MethodPost, linuxDOTokenURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequest(http.MethodPost, gitHubTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "TempMail")
 	res, err := h.httpClient.Do(req)
 	if err != nil {
 		return "", err
@@ -199,26 +186,36 @@ func (h *LinuxDOHandler) exchangeCode(code string, cfg linuxDOOAuthConfig) (stri
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", fmt.Errorf("Linux DO token exchange failed: HTTP %d", res.StatusCode)
+		return "", fmt.Errorf("GitHub token exchange failed: HTTP %d", res.StatusCode)
 	}
 	var data struct {
 		AccessToken string `json:"access_token"`
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
 	}
 	if err := json.Unmarshal(body, &data); err != nil {
 		return "", err
 	}
+	if data.Error != "" {
+		if data.Description != "" {
+			return "", fmt.Errorf("GitHub token exchange failed: %s", data.Description)
+		}
+		return "", fmt.Errorf("GitHub token exchange failed: %s", data.Error)
+	}
 	if data.AccessToken == "" {
-		return "", fmt.Errorf("Linux DO token exchange returned no access_token")
+		return "", fmt.Errorf("GitHub token exchange returned no access_token")
 	}
 	return data.AccessToken, nil
 }
 
-func (h *LinuxDOHandler) fetchUserInfo(token string) (*linuxDOProfile, error) {
-	req, err := http.NewRequest(http.MethodGet, linuxDOUserInfoURL, nil)
+func (h *GitHubHandler) fetchUserInfo(token string) (*gitHubProfile, error) {
+	req, err := http.NewRequest(http.MethodGet, gitHubUserInfoURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "TempMail")
 	res, err := h.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -226,32 +223,32 @@ func (h *LinuxDOHandler) fetchUserInfo(token string) (*linuxDOProfile, error) {
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("Linux DO userinfo failed: HTTP %d", res.StatusCode)
+		return nil, fmt.Errorf("GitHub userinfo failed: HTTP %d", res.StatusCode)
 	}
-	var profile linuxDOProfile
+	var profile gitHubProfile
 	if err := json.Unmarshal(body, &profile); err != nil {
 		return nil, err
 	}
 	return &profile, nil
 }
 
-type linuxDOProfile struct {
-	ID       json.RawMessage `json:"id"`
-	Username string          `json:"username"`
-	Name     string          `json:"name"`
+type gitHubProfile struct {
+	ID    json.RawMessage `json:"id"`
+	Login string          `json:"login"`
+	Name  string          `json:"name"`
 }
 
-func linuxDOUsername(profile *linuxDOProfile) string {
-	for _, v := range []string{profile.Username, profile.Name, "linuxdo_" + profile.IDString()} {
+func gitHubUsername(profile *gitHubProfile) string {
+	for _, v := range []string{profile.Login, profile.Name, "github_" + profile.IDString()} {
 		v = strings.TrimSpace(v)
 		if v != "" {
-			return normalizeUsernameWithFallback(v, "linuxdo_user")
+			return normalizeUsernameWithFallback(v, "github_user")
 		}
 	}
-	return "linuxdo_user"
+	return "github_user"
 }
 
-func (p *linuxDOProfile) IDString() string {
+func (p *gitHubProfile) IDString() string {
 	var s string
 	if err := json.Unmarshal(p.ID, &s); err == nil {
 		return strings.TrimSpace(s)
@@ -263,34 +260,4 @@ func (p *linuxDOProfile) IDString() string {
 		return n.String()
 	}
 	return strings.TrimSpace(string(p.ID))
-}
-
-func normalizeUsername(s string) string {
-	return normalizeUsernameWithFallback(s, "linuxdo_user")
-}
-
-func normalizeUsernameWithFallback(s, fallback string) string {
-	s = strings.ToLower(strings.TrimSpace(html.UnescapeString(s)))
-	var b strings.Builder
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
-			b.WriteRune(r)
-		}
-	}
-	name := b.String()
-	if len(name) < 2 {
-		return fallback
-	}
-	if len(name) > 48 {
-		return name[:48]
-	}
-	return name
-}
-
-func randomState() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }

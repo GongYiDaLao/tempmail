@@ -14,6 +14,7 @@
 | 域名健康监控 | 每 6 小时重检已激活域名，MX 失效自动暂停（`status=disabled`）|
 | IP / Hostname 分离 | 服务器 IP 与邮件主机名通过环境变量或后台设置注入，不写入代码 |
 | API Key 鉴权 | 每用户独立 API Key（`X-API-Key` 头），速率限制 500 次/分钟 |
+| OAuth 登录 | 支持 Linux DO Connect 与 GitHub OAuth 登录，可在后台独立开关 |
 | 管理后台 | Web GUI 管理账户、域名、邮件、系统配置（含 SMTP Hostname）|
 | Dashboard 统计 | 实时展示邮箱数、邮件数、域名数、账户数 |
 | 公告系统 | 管理员可设置公告，用户登录后显示 |
@@ -81,6 +82,9 @@ docker compose logs api | grep "ADMIN API KEY"
 | `API_PORT` | `8080` | API 监听端口 |
 | `API_RATE_LIMIT` | `500` | 每令牌每窗口期最大请求数 |
 | `API_RATE_WINDOW` | `60` | 速率窗口（秒）|
+| `GITHUB_CLIENT_ID` | *(可选)* | GitHub OAuth App 的 Client ID，也可在后台系统设置中填写 |
+| `GITHUB_CLIENT_SECRET` | *(可选)* | GitHub OAuth App 的 Client Secret，也可在后台系统设置中填写 |
+| `GITHUB_REDIRECT_URL` | *(可选)* | GitHub OAuth 回调地址，如 `https://your-domain.com/public/auth/github/callback` |
 | `ADMIN_KEY_FILE` | `/data/admin.key` | 管理员 Key 写入路径（容器内）|
 
 `.env` 示例：
@@ -88,9 +92,11 @@ docker compose logs api | grep "ADMIN API KEY"
 ```dotenv
 SMTP_SERVER_IP=1.2.3.4
 SMTP_HOSTNAME=mail.yourdomain.com
+GITHUB_REDIRECT_URL=https://your-domain.com/public/auth/github/callback
 ```
 
 > `SMTP_SERVER_IP` / `SMTP_HOSTNAME` 也可在管理后台「系统设置」中修改，DB 值优先于环境变量。
+> GitHub 登录需要在 GitHub OAuth App 中把 Authorization callback URL 设置为 `/public/auth/github/callback` 对应的完整公网地址，并在后台开启「GitHub 登录」。
 
 ---
 

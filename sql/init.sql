@@ -14,6 +14,7 @@ CREATE TABLE accounts (
     username    VARCHAR(64)  NOT NULL UNIQUE,
     api_key     VARCHAR(64)  NOT NULL UNIQUE,
     linuxdo_id  VARCHAR(128) UNIQUE,
+    github_id   VARCHAR(128) UNIQUE,
     is_admin    BOOLEAN      NOT NULL DEFAULT FALSE,
     is_active   BOOLEAN      NOT NULL DEFAULT TRUE,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -104,6 +105,10 @@ INSERT INTO app_settings (key, value) VALUES ('linuxdo_login_enabled', 'false') 
 INSERT INTO app_settings (key, value) VALUES ('linuxdo_client_id', '') ON CONFLICT DO NOTHING;
 INSERT INTO app_settings (key, value) VALUES ('linuxdo_client_secret', '') ON CONFLICT DO NOTHING;
 INSERT INTO app_settings (key, value) VALUES ('linuxdo_redirect_url', '') ON CONFLICT DO NOTHING;
+INSERT INTO app_settings (key, value) VALUES ('github_login_enabled', 'false') ON CONFLICT DO NOTHING;
+INSERT INTO app_settings (key, value) VALUES ('github_client_id', '') ON CONFLICT DO NOTHING;
+INSERT INTO app_settings (key, value) VALUES ('github_client_secret', '') ON CONFLICT DO NOTHING;
+INSERT INTO app_settings (key, value) VALUES ('github_redirect_url', '') ON CONFLICT DO NOTHING;
 INSERT INTO app_settings (key, value) VALUES ('smtp_server_ip', '') ON CONFLICT DO NOTHING;
 INSERT INTO app_settings (key, value) VALUES ('smtp_hostname', '') ON CONFLICT DO NOTHING;
 INSERT INTO app_settings (key, value) VALUES ('mailbox_ttl_minutes', '30') ON CONFLICT DO NOTHING;

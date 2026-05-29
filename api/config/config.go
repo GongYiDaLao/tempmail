@@ -17,6 +17,9 @@ type Config struct {
 	LinuxDOClientID     string
 	LinuxDOClientSecret string
 	LinuxDORedirectURL  string
+	GitHubClientID      string
+	GitHubClientSecret  string
+	GitHubRedirectURL   string
 }
 
 func Load() *Config {
@@ -44,6 +47,9 @@ func Load() *Config {
 		LinuxDOClientID:     os.Getenv("LINUXDO_CLIENT_ID"),
 		LinuxDOClientSecret: os.Getenv("LINUXDO_CLIENT_SECRET"),
 		LinuxDORedirectURL:  os.Getenv("LINUXDO_REDIRECT_URL"),
+		GitHubClientID:      os.Getenv("GITHUB_CLIENT_ID"),
+		GitHubClientSecret:  os.Getenv("GITHUB_CLIENT_SECRET"),
+		GitHubRedirectURL:   os.Getenv("GITHUB_REDIRECT_URL"),
 	}
 }
 
