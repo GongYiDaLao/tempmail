@@ -113,7 +113,7 @@ services:
 
   # ==================== Go API 服务 ====================
   api:
-    image: 123nhh/tempmail-api:latest
+    image: ghcr.io/${DOCKER_IMAGE_NAMESPACE:-futureppo}/tempmail-api:${DOCKER_IMAGE_TAG:-latest}
     build:
       context: ./api
     restart: unless-stopped
@@ -161,7 +161,7 @@ services:
 
   # ==================== Postfix 收件服务 ====================
   postfix:
-    image: 123nhh/tempmail-postfix:latest
+    image: ghcr.io/${DOCKER_IMAGE_NAMESPACE:-futureppo}/tempmail-postfix:${DOCKER_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: postfix/Dockerfile
