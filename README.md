@@ -77,9 +77,21 @@ docker compose logs api | grep "ADMIN API KEY"
 |------|--------|------|
 | `SMTP_SERVER_IP` | *(必填)* | 服务器公网 IP，用于 MX 验证与 SPF 生成 |
 | `SMTP_HOSTNAME` | *(推荐填写)* | 邮件服务器主机名，如 `mail.yourdomain.com`。设置后用户添加域名只需一条 MX 记录，无需 A 记录 |
-| `DATABASE_URL` | `postgres://tempmail:tempmail@pgbouncer:5432/tempmail` | 数据库连接串（经 PgBouncer）|
-| `REDIS_URL` | `redis://redis:6379` | Redis 连接地址 |
+| `API_DB_DSN` | `postgres://tempmail:...@pgbouncer:6432/tempmail` | API 数据库连接串（经 PgBouncer）|
+| `API_REDIS_ADDR` | `redis:6379` | Redis 连接地址 |
 | `API_PORT` | `8080` | API 监听端口 |
+| `API_DB_MAX_CONNS` | `128` | API 到 PgBouncer 的最大客户端连接数 |
+| `API_DB_MIN_CONNS` | `16` | API 预热数据库连接数 |
+| `API_DELIVERY_BATCH_ENABLED` | `true` | 是否启用单封内部投递微批；不改变 API 路径或响应，可设为 `false` 快速回退 |
+| `API_DELIVERY_BATCH_MAX` | `64` | 单封内部投递微批的最大邮件数（允许 1–256，不改变 API 路径）|
+| `API_DELIVERY_BATCH_WAIT` | `1ms` | 收集并发单封投递的最长等待时间（允许 100µs–100ms）|
+| `PGBOUNCER_DEFAULT_POOL_SIZE` | `64` | PgBouncer 到 PostgreSQL 的常规连接数 |
+| `PGBOUNCER_RESERVE_POOL_SIZE` | `16` | PgBouncer 预留连接数 |
+| `POSTFIX_DEFAULT_PROCESS_LIMIT` | `500` | Postfix 服务默认进程上限 |
+| `POSTFIX_SMTPD_PROCESS_LIMIT` | `200` | SMTP 服务全局进程上限，避免多来源流量挤占 LMTP |
+| `POSTFIX_SMTPD_CLIENT_CONNECTION_COUNT_LIMIT` | `200` | 单来源 IP 同时 SMTP 连接上限 |
+| `POSTFIX_SMTPD_CLIENT_CONNECTION_RATE_LIMIT` | `0` | 单来源建连速率；`0` 为关闭 |
+| `POSTFIX_LMTP_DESTINATION_CONCURRENCY_LIMIT` | `128` | Postfix 到 LMTP daemon 的投递并发 |
 | `API_RATE_LIMIT` | `500` | 每令牌每窗口期最大请求数 |
 | `API_RATE_WINDOW` | `60` | 速率窗口（秒）|
 | `GITHUB_CLIENT_ID` | *(可选)* | GitHub OAuth App 的 Client ID，也可在后台系统设置中填写 |
@@ -97,6 +109,29 @@ GITHUB_REDIRECT_URL=https://your-domain.com/public/auth/github/callback
 
 > `SMTP_SERVER_IP` / `SMTP_HOSTNAME` 也可在管理后台「系统设置」中修改，DB 值优先于环境变量。
 > GitHub 登录需要在 GitHub OAuth App 中把 Authorization callback URL 设置为 `/public/auth/github/callback` 对应的完整公网地址，并在后台开启「GitHub 登录」。
+
+### 吞吐压测
+
+仓库提供两个只使用现有调用路径的压测命令：
+
+```bash
+cd api
+
+# API → PgBouncer → PostgreSQL；响应成功代表事务已提交
+go run ./cmd/deliverbench \
+  -url http://127.0.0.1:8080 \
+  -recipient mailbox@example.com \
+  -requests 30000 -concurrency 128 -raw-bytes 1024
+
+# SMTP → Postfix queue → LMTP → 原 internal API → PostgreSQL
+go run ./cmd/smtpbench \
+  -addr 127.0.0.1:25 \
+  -recipient mailbox@example.com \
+  -messages 10000 -concurrency 200 -messages-per-connection 10 \
+  -database-dsn "$BENCH_DATABASE_DSN"
+```
+
+`BENCH_DATABASE_DSN` 必须是压测进程可访问的 PostgreSQL/PgBouncer 地址。SMTP 端到端测试应使用没有其他流量的专用邮箱，并在开始前确认队列为空；发送完成后先等待 `postqueue -p` 为空，再确认该邮箱的数据库增量精确等于 `accepted`。未传 `-database-dsn` 且未设置 `BENCH_DATABASE_DSN` 时，命令只报告 Postfix 接收速率，不能代表最终落盘吞吐。
 
 ---
 
@@ -256,12 +291,15 @@ X-RateLimit-Reset: 1735000000
 | `sql/migrate_v6.sql` | v5 → v6：账户收件统计 |
 | `sql/migrate_v7.sql` | v6 → v7：自定义站点 Logo |
 | `sql/migrate_v8.sql` | v7 → v8：多级/通配域名支持 |
+| `sql/migrate_v9.sql` | v8 → v9：GitHub OAuth 登录 |
+| `sql/migrate_v10.sql` | v9 → v10：分别跟踪单域名与通配子域名能力 |
+| `sql/migrate_v11.sql` | v10 → v11：邮箱累计收件数扩展为 BIGINT |
 
-对已运行的库执行迁移：
+对已运行的库按版本顺序执行尚未应用的迁移。例如从 v10 升级：
 
 ```bash
 docker exec -i $(docker compose ps -q postgres) \
-  psql -U tempmail -d tempmail < sql/migrate_v8.sql
+  psql -U tempmail -d tempmail < sql/migrate_v11.sql
 ```
 
 ---

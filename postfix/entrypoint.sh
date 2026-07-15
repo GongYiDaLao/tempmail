@@ -19,6 +19,7 @@ SOCK_PATH="$SOCK_DIR/mail-receiver"
 export LMTPD_SOCKET="$SOCK_PATH"
 export API_URL="${API_URL:-http://api:8080}"
 export LMTPD_HOSTNAME="${SMTP_HOSTNAME:-mail.example.com}"
+export DOMAIN_MAP="${DOMAIN_MAP:-/var/spool/postfix/virtual_domains}"
 
 # 启动 LMTP daemon（后台），异常退出会让容器整体重启
 /usr/local/bin/mail-receiver &
@@ -35,24 +36,21 @@ if [ ! -S "$SOCK_PATH" ]; then
 fi
 chown postfix:postfix "$SOCK_PATH" 2>/dev/null || true
 
-# 生成初始虚拟域名列表（Postfix regexp map 格式）
-DEFAULT_DOMAIN="${SMTP_HOSTNAME:-mail.example.com}"
-python3 - "$DEFAULT_DOMAIN" > /etc/postfix/virtual_domains << 'PY'
-import re
-import sys
-
-domain = sys.argv[1].strip().lower().rstrip(".")
-print(f"/^{re.escape(domain)}$/     OK")
-PY
+# API/数据库是域名映射的唯一真源。合法的“零活跃域名”也是空文件，
+# 因此只在文件不存在时创建，绝不能在重启时用 SMTP_HOSTNAME 回填。
+if [ ! -e "$DOMAIN_MAP" ]; then
+    touch "$DOMAIN_MAP"
+fi
 
 cat > /usr/local/bin/sync-domains.sh << 'SCRIPT'
 #!/bin/bash
 set -e
 
 API_URL="${API_URL:-http://api:8080}"
+DOMAIN_MAP="${DOMAIN_MAP:-/var/spool/postfix/virtual_domains}"
 DOMAINS=$(curl -sf "$API_URL/internal/domains" 2>/dev/null || echo "")
 if [ -n "$DOMAINS" ]; then
-    echo "$DOMAINS" | python3 -c '
+    if echo "$DOMAINS" | python3 -c '
 import json
 import re
 import sys
@@ -99,14 +97,17 @@ def truthy(value):
 try:
     data = json.load(sys.stdin)
 except json.JSONDecodeError:
-    sys.exit(0)
+    sys.exit(1)
 
 if isinstance(data, dict):
-    records = data.get("domains", [])
+    records = data.get("domains")
 elif isinstance(data, list):
     records = data
 else:
-    records = []
+    sys.exit(1)
+
+if not isinstance(records, list):
+    sys.exit(1)
 
 lines = []
 seen = set()
@@ -145,11 +146,16 @@ for record in records:
             seen.add(line)
             lines.append(line)
 
-print("\n".join(lines))
-' > /etc/postfix/virtual_domains.new
-    if [ -s /etc/postfix/virtual_domains.new ]; then
-        mv /etc/postfix/virtual_domains.new /etc/postfix/virtual_domains
-        postfix reload 2>/dev/null || true
+sys.stdout.write("\n".join(lines))
+' > "$DOMAIN_MAP.new"; then
+        if cmp -s "$DOMAIN_MAP.new" "$DOMAIN_MAP"; then
+            rm -f "$DOMAIN_MAP.new"
+        else
+            mv "$DOMAIN_MAP.new" "$DOMAIN_MAP"
+            postfix reload 2>/dev/null || true
+        fi
+    else
+        rm -f "$DOMAIN_MAP.new"
     fi
 fi
 SCRIPT
@@ -159,8 +165,40 @@ chmod +x /usr/local/bin/sync-domains.sh
 (while true; do sleep 60; /usr/local/bin/sync-domains.sh; done) &
 
 postconf -e "myhostname=${SMTP_HOSTNAME:-mail.example.com}"
-postconf -e "virtual_mailbox_domains=regexp:/etc/postfix/virtual_domains"
+postconf -e "virtual_mailbox_domains=regexp:${DOMAIN_MAP}"
 postconf -e "virtual_transport=lmtp:unix:private/mail-receiver"
+
+set_postfix_uint() {
+    key="$1"
+    value="$2"
+    case "$value" in
+        ''|*[!0-9]*)
+            echo "invalid Postfix setting $key=$value" >&2
+            exit 1
+            ;;
+    esac
+    postconf -e "$key=$value"
+}
+
+# Keep the service paths unchanged while allowing deployments to tune the
+# actual SMTP and LMTP concurrency for their CPU, memory, and storage.
+set_postfix_uint default_process_limit "${POSTFIX_DEFAULT_PROCESS_LIMIT:-500}"
+set_postfix_uint smtpd_client_connection_count_limit "${POSTFIX_SMTPD_CLIENT_CONNECTION_COUNT_LIMIT:-200}"
+set_postfix_uint smtpd_client_connection_rate_limit "${POSTFIX_SMTPD_CLIENT_CONNECTION_RATE_LIMIT:-0}"
+set_postfix_uint default_destination_concurrency_limit "${POSTFIX_DEFAULT_DESTINATION_CONCURRENCY_LIMIT:-200}"
+set_postfix_uint lmtp_destination_concurrency_limit "${POSTFIX_LMTP_DESTINATION_CONCURRENCY_LIMIT:-128}"
+
+# The per-client limit above is not a global smtpd cap. Keep a separate master
+# service limit so traffic from many source IPs cannot consume all 500 default
+# Postfix process slots and starve cleanup/LMTP queue draining.
+SMTPD_PROCESS_LIMIT="${POSTFIX_SMTPD_PROCESS_LIMIT:-200}"
+case "$SMTPD_PROCESS_LIMIT" in
+    ''|*[!0-9]*)
+        echo "invalid Postfix smtpd process limit: $SMTPD_PROCESS_LIMIT" >&2
+        exit 1
+        ;;
+esac
+postconf -M "smtp/inet=smtp inet n - n - $SMTPD_PROCESS_LIMIT smtpd"
 
 trap "kill $RECEIVER_PID 2>/dev/null; exit 0" TERM INT
 

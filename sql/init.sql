@@ -58,7 +58,7 @@ CREATE TABLE mailboxes (
     address      VARCHAR(128) NOT NULL,  -- 本地部分，如 "abc123"
     domain_id    INT          NOT NULL REFERENCES domains(id),
     full_address VARCHAR(320) NOT NULL,  -- 完整地址 "abc123@mail.xxx.xyz"
-    received_email_count INT  NOT NULL DEFAULT 0,
+    received_email_count BIGINT NOT NULL DEFAULT 0,
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     expires_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW() + INTERVAL '30 minutes'
 );

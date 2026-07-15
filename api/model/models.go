@@ -21,10 +21,10 @@ type Account struct {
 
 type AccountWithStats struct {
 	Account
-	MailboxCount       int `json:"mailbox_count"`
-	ActiveMailboxCount int `json:"active_mailbox_count"`
-	CurrentEmailCount  int `json:"current_email_count"`
-	ReceivedEmailCount int `json:"received_email_count"`
+	MailboxCount       int64 `json:"mailbox_count"`
+	ActiveMailboxCount int64 `json:"active_mailbox_count"`
+	CurrentEmailCount  int64 `json:"current_email_count"`
+	ReceivedEmailCount int64 `json:"received_email_count"`
 }
 
 type Domain struct {
@@ -41,12 +41,12 @@ type Domain struct {
 }
 
 type Stats struct {
-	TotalMailboxes  int `json:"total_mailboxes"`
-	ActiveMailboxes int `json:"active_mailboxes"`
-	TotalEmails     int `json:"total_emails"`
-	ActiveDomains   int `json:"active_domains"`
-	PendingDomains  int `json:"pending_domains"`
-	TotalAccounts   int `json:"total_accounts"`
+	TotalMailboxes  int64 `json:"total_mailboxes"`
+	ActiveMailboxes int64 `json:"active_mailboxes"`
+	TotalEmails     int64 `json:"total_emails"`
+	ActiveDomains   int64 `json:"active_domains"`
+	PendingDomains  int64 `json:"pending_domains"`
+	TotalAccounts   int64 `json:"total_accounts"`
 }
 
 type Mailbox struct {

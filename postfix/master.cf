@@ -5,7 +5,7 @@
 # ==========================================================================
 # service type  private unpriv  chroot  wakeup  maxproc command + args
 # ==========================================================================
-smtp      inet  n       -       n       -       100     smtpd
+smtp      inet  n       -       n       -       -       smtpd
 pickup    unix  n       -       n       60      1       pickup
 cleanup   unix  n       -       n       -       0       cleanup
 qmgr      unix  n       -       n       300     1       qmgr
@@ -16,6 +16,7 @@ defer     unix  -       -       n       -       0       bounce
 trace     unix  -       -       n       -       0       bounce
 verify    unix  -       -       n       -       1       verify
 flush     unix  n       -       n       1000?   0       flush
+showq     unix  n       -       n       -       -       showq
 proxymap  unix  -       -       n       -       -       proxymap
 smtp      unix  -       -       n       -       -       smtp
 relay     unix  -       -       n       -       -       smtp

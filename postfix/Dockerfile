@@ -28,8 +28,8 @@ COPY postfix/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /usr/local/bin/mail-receiver /entrypoint.sh
 
-# 创建 regexp 虚拟域名表，运行时由 entrypoint 动态写入
-RUN touch /etc/postfix/virtual_domains
+# 域名映射与 Postfix 队列一起放在持久 spool 卷中。
+RUN touch /var/spool/postfix/virtual_domains
 
 EXPOSE 25
 

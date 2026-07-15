@@ -24,13 +24,24 @@ func main() {
 	cfg := config.Load()
 
 	// ==================== 连接数据库 ====================
-	ctx := context.Background()
-	db, err := store.New(ctx, cfg.DBDSN)
+	ctx, stopBackground := context.WithCancel(context.Background())
+	defer stopBackground()
+	db, err := store.NewWithOptions(ctx, cfg.DBDSN, store.PoolOptions{
+		MaxConns: cfg.DBMaxConns,
+		MinConns: cfg.DBMinConns,
+	})
 	if err != nil {
 		log.Fatalf("failed to connect database: %v", err)
 	}
 	defer db.Close()
 	log.Println("[OK] Database connected")
+	var deliveryBatcher *store.DeliveryBatcher
+	if cfg.DeliveryBatchEnabled {
+		deliveryBatcher = store.NewDeliveryBatcher(ctx, db, cfg.DeliveryBatchMax, cfg.DeliveryBatchWait)
+		log.Printf("[OK] Delivery micro-batcher started (max=%d, wait=%s)", cfg.DeliveryBatchMax, cfg.DeliveryBatchWait)
+	} else {
+		log.Println("[OK] Delivery micro-batcher disabled")
+	}
 
 	// ==================== 连接 Redis ====================
 	rdb := redis.NewClient(&redis.Options{
@@ -165,23 +176,37 @@ func main() {
 				return
 			}
 
-			// 查找收件邮箱
-			mailbox, err := db.GetMailboxByFullAddress(c.Request.Context(), req.Recipient)
-			if err != nil {
-				// 邮箱不存在，静默丢弃
-				c.JSON(http.StatusOK, gin.H{"status": "discarded", "reason": "unknown recipient"})
-				return
+			var delivery store.DeliveredEmail
+			var err error
+			if deliveryBatcher != nil {
+				delivery, err = deliveryBatcher.Deliver(c.Request.Context(), store.MessageDelivery{
+					Recipient: req.Recipient,
+					Sender:    req.Sender,
+					Subject:   req.Subject,
+					BodyText:  req.BodyText,
+					BodyHTML:  req.BodyHTML,
+					Raw:       req.Raw,
+				})
+			} else {
+				delivery, err = db.DeliverMessage(c.Request.Context(), store.MessageDelivery{
+					Recipient: req.Recipient,
+					Sender:    req.Sender,
+					Subject:   req.Subject,
+					BodyText:  req.BodyText,
+					BodyHTML:  req.BodyHTML,
+					Raw:       req.Raw,
+				})
 			}
-
-			// 存储邮件
-			email, err := db.InsertEmail(c.Request.Context(),
-				mailbox.ID, req.Sender, req.Subject, req.BodyText, req.BodyHTML, req.Raw)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
-
-			c.JSON(http.StatusOK, gin.H{"status": "delivered", "email_id": email.ID})
+			if !delivery.Delivered {
+				// 邮箱不存在，静默丢弃。
+				c.JSON(http.StatusOK, gin.H{"status": "discarded", "reason": "unknown recipient"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "delivered", "email_id": delivery.EmailID})
 		})
 
 		// 批量投递：一次 HTTP 调用写入多个收件人。
@@ -201,20 +226,22 @@ func main() {
 				return
 			}
 
-			results := make([]gin.H, 0, len(req.Recipients))
-			for _, rcpt := range req.Recipients {
-				mailbox, err := db.GetMailboxByFullAddress(c.Request.Context(), rcpt)
-				if err != nil {
-					results = append(results, gin.H{"recipient": rcpt, "status": "discarded", "reason": "unknown recipient"})
+			deliveries, err := db.DeliverEmails(c.Request.Context(), req.Recipients,
+				req.Sender, req.Subject, req.BodyText, req.BodyHTML, req.Raw)
+			if err != nil {
+				// The set-based statement is atomic, so a statement-wide failure
+				// cannot be attributed to one recipient.
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "recipient": ""})
+				return
+			}
+
+			results := make([]gin.H, 0, len(deliveries))
+			for _, delivery := range deliveries {
+				if !delivery.Delivered {
+					results = append(results, gin.H{"recipient": delivery.Recipient, "status": "discarded", "reason": "unknown recipient"})
 					continue
 				}
-				email, err := db.InsertEmail(c.Request.Context(),
-					mailbox.ID, req.Sender, req.Subject, req.BodyText, req.BodyHTML, req.Raw)
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "recipient": rcpt})
-					return
-				}
-				results = append(results, gin.H{"recipient": rcpt, "status": "delivered", "email_id": email.ID})
+				results = append(results, gin.H{"recipient": delivery.Recipient, "status": "delivered", "email_id": delivery.EmailID})
 			}
 			c.JSON(http.StatusOK, gin.H{"results": results})
 		})
@@ -235,7 +262,11 @@ func main() {
 	}()
 
 	// ==================== 邮件统计计数器后台 flush ====================
-	go db.RunStatsFlusher(ctx, time.Second)
+	statsFlusherDone := make(chan struct{})
+	go func() {
+		defer close(statsFlusherDone)
+		db.RunStatsFlusher(ctx, time.Second)
+	}()
 	log.Println("[OK] Email stats flusher started (interval=1s)")
 
 	// ==================== MX 自动验证轮询 ====================
@@ -357,7 +388,21 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+		log.Printf("Server forced to shutdown: %v", err)
+		_ = srv.Close()
+	}
+	if deliveryBatcher != nil {
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := deliveryBatcher.CloseAndDrain(drainCtx); err != nil {
+			log.Printf("Delivery batcher forced to stop: %v", err)
+		}
+		cancelDrain()
+	}
+	stopBackground()
+	select {
+	case <-statsFlusherDone:
+	case <-time.After(6 * time.Second):
+		log.Printf("[stats] final flush timed out")
 	}
 	log.Println("Server exited")
 }

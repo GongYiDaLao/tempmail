@@ -75,10 +75,19 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGBOUNCER_POOL_MODE: ${PGBOUNCER_POOL_MODE:-transaction}
+      PGBOUNCER_MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-2000}
+      PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-64}
+      PGBOUNCER_MIN_POOL_SIZE: ${PGBOUNCER_MIN_POOL_SIZE:-16}
+      PGBOUNCER_RESERVE_POOL_SIZE: ${PGBOUNCER_RESERVE_POOL_SIZE:-16}
     volumes:
       - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./pgbouncer/entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       postgres:
         condition: service_healthy
@@ -117,12 +126,22 @@ services:
     build:
       context: ./api
     restart: unless-stopped
+    stop_grace_period: 30s
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     ports:
-      - "8080:8080"
+      - "${API_HOST_PORT:-8080}:8080"
     volumes:
       - ./data:/data
     environment:
       DB_DSN: ${API_DB_DSN}
+      DB_MAX_CONNS: ${API_DB_MAX_CONNS:-128}
+      DB_MIN_CONNS: ${API_DB_MIN_CONNS:-16}
+      DELIVERY_BATCH_ENABLED: ${API_DELIVERY_BATCH_ENABLED:-true}
+      DELIVERY_BATCH_MAX: ${API_DELIVERY_BATCH_MAX:-64}
+      DELIVERY_BATCH_WAIT: ${API_DELIVERY_BATCH_WAIT:-1ms}
       REDIS_ADDR: ${API_REDIS_ADDR}
       REDIS_PASSWORD: ${API_REDIS_PASSWORD}
       RATE_LIMIT: ${API_RATE_LIMIT}
@@ -136,7 +155,7 @@ services:
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
       GITHUB_REDIRECT_URL: ${GITHUB_REDIRECT_URL:-}
-      ADMIN_KEY_FILE: /data/admin.key
+      ADMIN_KEY_FILE: ${ADMIN_KEY_FILE:-/data/admin.key}
     depends_on:
       pgbouncer:
         condition: service_started
@@ -150,7 +169,7 @@ services:
     image: nginx:alpine
     restart: unless-stopped
     ports:
-      - "8888:80"
+      - "${FRONTEND_HOST_PORT:-8888}:80"
     volumes:
       - ./frontend:/usr/share/nginx/html:ro
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
@@ -166,12 +185,27 @@ services:
       context: .
       dockerfile: postfix/Dockerfile
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     ports:
-      - "25:25"
+      - "${SMTP_HOST_PORT:-25}:25"
+    volumes:
+      - postfix_spool:/var/spool/postfix
     environment:
       DB_DSN: ${API_DB_DSN}
       SMTP_HOSTNAME: ${SMTP_HOSTNAME}
       API_URL: http://api:8080
+      POSTFIX_DEFAULT_PROCESS_LIMIT: ${POSTFIX_DEFAULT_PROCESS_LIMIT:-500}
+      POSTFIX_SMTPD_PROCESS_LIMIT: ${POSTFIX_SMTPD_PROCESS_LIMIT:-200}
+      POSTFIX_SMTPD_CLIENT_CONNECTION_COUNT_LIMIT: ${POSTFIX_SMTPD_CLIENT_CONNECTION_COUNT_LIMIT:-200}
+      POSTFIX_SMTPD_CLIENT_CONNECTION_RATE_LIMIT: ${POSTFIX_SMTPD_CLIENT_CONNECTION_RATE_LIMIT:-0}
+      POSTFIX_DEFAULT_DESTINATION_CONCURRENCY_LIMIT: ${POSTFIX_DEFAULT_DESTINATION_CONCURRENCY_LIMIT:-200}
+      POSTFIX_LMTP_DESTINATION_CONCURRENCY_LIMIT: ${POSTFIX_LMTP_DESTINATION_CONCURRENCY_LIMIT:-128}
+      LMTP_HTTP_MAX_IDLE_CONNS: ${LMTP_HTTP_MAX_IDLE_CONNS:-512}
+      LMTP_HTTP_MAX_IDLE_CONNS_PER_HOST: ${LMTP_HTTP_MAX_IDLE_CONNS_PER_HOST:-256}
+      LMTP_HTTP_MAX_CONNS_PER_HOST: ${LMTP_HTTP_MAX_CONNS_PER_HOST:-512}
     depends_on:
       pgbouncer:
         condition: service_started
@@ -180,6 +214,7 @@ services:
 
 volumes:
   pgdata:
+  postfix_spool:
 
 networks:
   internal:

@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +38,21 @@ func (c *emailCounters) inc(mailboxID uuid.UUID) {
 		c.mailbox = make(map[uuid.UUID]int64)
 	}
 	c.mailbox[mailboxID]++
+	c.mu.Unlock()
+}
+
+func (c *emailCounters) incMany(mailboxIDs []uuid.UUID) {
+	if len(mailboxIDs) == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.total += int64(len(mailboxIDs))
+	if c.mailbox == nil {
+		c.mailbox = make(map[uuid.UUID]int64)
+	}
+	for _, mailboxID := range mailboxIDs {
+		c.mailbox[mailboxID]++
+	}
 	c.mu.Unlock()
 }
 
@@ -65,6 +83,11 @@ type Store struct {
 	counters emailCounters
 }
 
+type PoolOptions struct {
+	MaxConns int32
+	MinConns int32
+}
+
 const (
 	DomainTypeExact    = "exact"
 	DomainTypeWildcard = "wildcard"
@@ -85,14 +108,28 @@ func (e *DomainInUseError) Error() string {
 
 // New 创建带连接池的 Store（高并发核心）
 func New(ctx context.Context, dsn string) (*Store, error) {
+	return NewWithOptions(ctx, dsn, PoolOptions{})
+}
+
+func NewWithOptions(ctx context.Context, dsn string, options PoolOptions) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
 
-	// 连接池：不限并发，由 PgBouncer 统一管控实际 PG 连接数
-	cfg.MaxConns = 500
-	cfg.MinConns = 20
+	if options.MaxConns <= 0 {
+		options.MaxConns = 128
+	}
+	if options.MinConns < 0 {
+		options.MinConns = 0
+	} else if options.MinConns == 0 {
+		options.MinConns = 16
+	}
+	if options.MinConns > options.MaxConns {
+		options.MinConns = options.MaxConns
+	}
+	cfg.MaxConns = options.MaxConns
+	cfg.MinConns = options.MinConns
 	cfg.MaxConnLifetime = 30 * time.Minute
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.HealthCheckPeriod = 30 * time.Second
@@ -224,14 +261,14 @@ func (s *Store) ListAccounts(ctx context.Context, page, size int) ([]model.Accou
 	rows, err := s.pool.Query(ctx,
 		`SELECT
 			a.id, a.username, a.api_key, COALESCE(a.linuxdo_id, ''), a.is_admin, a.is_active, a.created_at, a.updated_at,
-			COUNT(DISTINCT m.id)::INT AS mailbox_count,
-			COUNT(DISTINCT m.id) FILTER (WHERE m.expires_at > NOW())::INT AS active_mailbox_count,
-			COUNT(e.id)::INT AS current_email_count,
-			COALESCE(SUM(m.received_email_count), 0)::INT AS received_email_count
+			(SELECT COUNT(*)::BIGINT FROM mailboxes m WHERE m.account_id = a.id) AS mailbox_count,
+			(SELECT COUNT(*)::BIGINT FROM mailboxes m WHERE m.account_id = a.id AND m.expires_at > NOW()) AS active_mailbox_count,
+			(SELECT COUNT(*)::BIGINT
+			 FROM emails e
+			 JOIN mailboxes m ON m.id = e.mailbox_id
+			 WHERE m.account_id = a.id) AS current_email_count,
+			COALESCE((SELECT SUM(m.received_email_count)::BIGINT FROM mailboxes m WHERE m.account_id = a.id), 0) AS received_email_count
 		 FROM accounts a
-		 LEFT JOIN mailboxes m ON m.account_id = a.id
-		 LEFT JOIN emails e ON e.mailbox_id = m.id
-		 GROUP BY a.id
 		 ORDER BY a.created_at DESC LIMIT $1 OFFSET $2`,
 		size, (page-1)*size,
 	)
@@ -533,7 +570,7 @@ func (s *Store) GetStats(ctx context.Context) (*model.Stats, error) {
 		SELECT
 		  (SELECT COUNT(*) FROM mailboxes)                         AS total_mailboxes,
 		  (SELECT COUNT(*) FROM mailboxes WHERE expires_at > NOW()) AS active_mailboxes,
-		  COALESCE((SELECT NULLIF(value, '')::INT FROM app_settings WHERE key = 'total_emails_received'), (SELECT COUNT(*) FROM emails)) AS total_emails,
+			  COALESCE((SELECT NULLIF(value, '')::BIGINT FROM app_settings WHERE key = 'total_emails_received'), (SELECT COUNT(*) FROM emails)) AS total_emails,
 		  (SELECT COUNT(*) FROM domains WHERE is_active = TRUE)    AS active_domains,
 		  (SELECT COUNT(*) FROM domains WHERE status = 'pending')  AS pending_domains,
 		  (SELECT COUNT(*) FROM accounts WHERE is_active = TRUE)   AS total_accounts
@@ -547,7 +584,7 @@ func (s *Store) GetStats(ctx context.Context) (*model.Stats, error) {
 	}
 	// 加上还没 flush 到数据库的内存计数，让前台看到接近实时值。
 	pendingTotal, _ := s.counters.snapshot()
-	st.TotalEmails += int(pendingTotal)
+	st.TotalEmails += pendingTotal
 	return &st, nil
 }
 
@@ -755,20 +792,116 @@ func checkMXName(kind, lookupName, serverIP string) MXCheckDetail {
 
 // ==================== Email ====================
 
+// DeliveredEmail is an internal persistence result. Ordinal is one-based and
+// matches the recipient's position in the request. Unknown recipients are
+// returned with Delivered=false so the API can preserve its response order.
+type DeliveredEmail struct {
+	Ordinal   int64
+	Recipient string
+	EmailID   uuid.UUID
+	MailboxID uuid.UUID
+	Delivered bool
+}
+
 func (s *Store) InsertEmail(ctx context.Context, mailboxID uuid.UUID, sender, subject, bodyText, bodyHTML, raw string) (*model.Email, error) {
-	var e model.Email
+	e := model.Email{
+		MailboxID:  mailboxID,
+		Sender:     sender,
+		Subject:    subject,
+		BodyText:   bodyText,
+		BodyHTML:   bodyHTML,
+		RawMessage: raw,
+		SizeBytes:  len(raw),
+	}
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO emails (mailbox_id, sender, subject, body_text, body_html, raw_message, size_bytes)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 RETURNING id, mailbox_id, sender, subject, body_text, body_html, raw_message, size_bytes, received_at`,
+		 RETURNING id, received_at`,
 		mailboxID, sender, subject, bodyText, bodyHTML, raw, len(raw),
-	).Scan(&e.ID, &e.MailboxID, &e.Sender, &e.Subject, &e.BodyText, &e.BodyHTML, &e.RawMessage, &e.SizeBytes, &e.ReceivedAt)
+	).Scan(&e.ID, &e.ReceivedAt)
 	if err != nil {
 		return nil, err
 	}
 	// 热点累加放入内存计数器，由 RunStatsFlusher 异步 flush，避免高并发争抢同一行。
 	s.counters.inc(mailboxID)
 	return &e, nil
+}
+
+// DeliverEmails atomically resolves recipients and persists all matching
+// deliveries in one PostgreSQL statement. It preserves input order, original
+// recipient spelling, and duplicate recipients for API compatibility.
+func (s *Store) DeliverEmails(ctx context.Context, recipients []string, sender, subject, bodyText, bodyHTML, raw string) ([]DeliveredEmail, error) {
+	if len(recipients) == 0 {
+		return []DeliveredEmail{}, nil
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		WITH input AS MATERIALIZED (
+			SELECT recipient, ordinality::BIGINT AS ordinal
+			FROM unnest($1::TEXT[]) WITH ORDINALITY AS u(recipient, ordinality)
+		),
+		matched AS MATERIALIZED (
+			SELECT
+				i.ordinal,
+				i.recipient,
+				m.id AS mailbox_id,
+				gen_random_uuid() AS email_id
+			FROM input AS i
+			JOIN mailboxes AS m ON m.full_address = lower(i.recipient)
+		),
+		inserted AS (
+			INSERT INTO emails (id, mailbox_id, sender, subject, body_text, body_html, raw_message, size_bytes)
+			SELECT email_id, mailbox_id, $2, $3, $4, $5, $6, $7
+			FROM matched
+			ORDER BY ordinal
+			RETURNING id
+		)
+		SELECT
+			i.ordinal,
+			i.recipient,
+			COALESCE(m.email_id, '00000000-0000-0000-0000-000000000000'::UUID),
+			COALESCE(m.mailbox_id, '00000000-0000-0000-0000-000000000000'::UUID),
+			(ins.id IS NOT NULL) AS delivered
+		FROM input AS i
+		LEFT JOIN matched AS m ON m.ordinal = i.ordinal
+		LEFT JOIN inserted AS ins ON ins.id = m.email_id
+		ORDER BY i.ordinal`,
+		recipients, sender, subject, bodyText, bodyHTML, raw, len(raw),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]DeliveredEmail, 0, len(recipients))
+	for rows.Next() {
+		var result DeliveredEmail
+		if err := rows.Scan(
+			&result.Ordinal,
+			&result.Recipient,
+			&result.EmailID,
+			&result.MailboxID,
+			&result.Delivered,
+		); err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(results) != len(recipients) {
+		return nil, fmt.Errorf("delivery result count mismatch: got %d, want %d", len(results), len(recipients))
+	}
+
+	deliveredMailboxIDs := make([]uuid.UUID, 0, len(results))
+	for _, result := range results {
+		if result.Delivered {
+			deliveredMailboxIDs = append(deliveredMailboxIDs, result.MailboxID)
+		}
+	}
+	s.counters.incMany(deliveredMailboxIDs)
+	return results, nil
 }
 
 // RunStatsFlusher 周期性把内存累计写回数据库。
@@ -782,7 +915,9 @@ func (s *Store) RunStatsFlusher(ctx context.Context, interval time.Duration) {
 	for {
 		select {
 		case <-ctx.Done():
-			s.flushCounters(context.Background())
+			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			s.flushCounters(flushCtx)
+			cancel()
 			return
 		case <-t.C:
 			s.flushCounters(ctx)
@@ -796,36 +931,66 @@ func (s *Store) flushCounters(ctx context.Context) {
 		return
 	}
 
-	if total > 0 {
-		_, err := s.pool.Exec(ctx, `
+	mailboxIDs := make([]uuid.UUID, 0, len(mailboxes))
+	for id := range mailboxes {
+		mailboxIDs = append(mailboxIDs, id)
+	}
+	sort.Slice(mailboxIDs, func(i, j int) bool {
+		return strings.Compare(mailboxIDs[i].String(), mailboxIDs[j].String()) < 0
+	})
+	type mailboxDelta struct {
+		ID    string `json:"id"`
+		Value int64  `json:"value"`
+	}
+	deltas := make([]mailboxDelta, len(mailboxIDs))
+	for i, id := range mailboxIDs {
+		deltas[i] = mailboxDelta{ID: id.String(), Value: mailboxes[id]}
+	}
+	deltasJSON, err := json.Marshal(deltas)
+
+	var tx pgx.Tx
+	if err == nil {
+		tx, err = s.pool.Begin(ctx)
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `
 			INSERT INTO app_settings (key, value) VALUES ('total_emails_received', $1::TEXT)
 			ON CONFLICT (key) DO UPDATE
 			SET value = ((COALESCE(NULLIF(app_settings.value, ''), '0')::BIGINT + EXCLUDED.value::BIGINT)::TEXT), updated_at = NOW()
 		`, total)
-		if err != nil {
-			// 失败时把计数加回去，下次再 flush。
-			s.counters.mu.Lock()
-			s.counters.total += total
-			s.counters.mu.Unlock()
-		}
+	}
+	if err == nil && len(mailboxIDs) > 0 {
+		_, err = tx.Exec(ctx, `
+			UPDATE mailboxes AS m
+			SET received_email_count = m.received_email_count + delta.value
+			FROM jsonb_to_recordset($1::JSONB) AS delta(id UUID, value BIGINT)
+			WHERE m.id = delta.id`,
+			string(deltasJSON),
+		)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	} else if tx != nil {
+		_ = tx.Rollback(ctx)
+	}
+	if err == nil {
+		return
 	}
 
+	// The transaction is all-or-nothing. Restore the entire drained snapshot
+	// exactly once so a transient database failure cannot lose or double-count.
+	s.counters.mu.Lock()
+	s.counters.total += total
+	if s.counters.mailbox == nil {
+		s.counters.mailbox = make(map[uuid.UUID]int64, len(mailboxes))
+	}
 	for id, n := range mailboxes {
-		if n == 0 {
-			continue
-		}
-		_, err := s.pool.Exec(ctx,
-			`UPDATE mailboxes SET received_email_count = received_email_count + $1 WHERE id = $2`,
-			n, id,
-		)
-		if err != nil {
-			s.counters.mu.Lock()
-			if s.counters.mailbox == nil {
-				s.counters.mailbox = make(map[uuid.UUID]int64)
-			}
-			s.counters.mailbox[id] += n
-			s.counters.mu.Unlock()
-		}
+		s.counters.mailbox[id] += n
+	}
+	s.counters.mu.Unlock()
+	if ctx.Err() == nil {
+		// Avoid noisy shutdown logs while still surfacing live flush failures.
+		log.Printf("[stats] flush failed: %v", err)
 	}
 }
 

@@ -34,8 +34,10 @@ smtpd_recipient_restrictions =
 
 # 性能优化
 smtpd_client_connection_count_limit = 200
-smtpd_client_connection_rate_limit = 600
+smtpd_client_connection_rate_limit = 0
 default_process_limit = 500
+# 保留入站流控：关闭后只会更快堆积队列，并会挤压 LMTP/API/PG 的最终落盘吞吐。
+in_flow_delay = 1s
 maximal_queue_lifetime = 1d
 bounce_queue_lifetime = 1d
 message_size_limit = 10240000
@@ -43,3 +45,4 @@ message_size_limit = 10240000
 # 并发
 smtp_destination_concurrency_limit = 50
 default_destination_concurrency_limit = 200
+lmtp_destination_concurrency_limit = 128

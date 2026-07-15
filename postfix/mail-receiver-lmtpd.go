@@ -31,6 +31,7 @@ import (
 	"net/mail"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,8 +40,9 @@ import (
 )
 
 const (
-	maxMessageBytes = 25 << 20
-	apiTimeout      = 15 * time.Second
+	maxMessageBytes       = 25 << 20
+	maxBatchResponseBytes = 4 << 20
+	apiTimeout            = 15 * time.Second
 )
 
 type deliverPayload struct {
@@ -87,7 +89,7 @@ func main() {
 	srv := &server{
 		hostname:   hostname,
 		apiURL:     apiURL,
-		httpClient: &http.Client{Timeout: apiTimeout},
+		httpClient: newAPIHTTPClient(),
 	}
 
 	listeners := make([]net.Listener, 0, 2)
@@ -144,6 +146,42 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getenvInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		log.Printf("invalid %s=%q, using %d", key, raw, fallback)
+		return fallback
+	}
+	return v
+}
+
+func newAPIHTTPClient() *http.Client {
+	maxIdle := getenvInt("LMTP_HTTP_MAX_IDLE_CONNS", 512)
+	maxIdlePerHost := getenvInt("LMTP_HTTP_MAX_IDLE_CONNS_PER_HOST", 256)
+	maxConnsPerHost := getenvInt("LMTP_HTTP_MAX_CONNS_PER_HOST", 512)
+
+	return &http.Client{
+		Timeout: apiTimeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   3 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          maxIdle,
+			MaxIdleConnsPerHost:   maxIdlePerHost,
+			MaxConnsPerHost:       maxConnsPerHost,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: apiTimeout,
+			ForceAttemptHTTP2:     false,
+		},
+	}
 }
 
 func (s *server) acceptLoop(ctx context.Context, l net.Listener) {
@@ -310,10 +348,12 @@ func (s *session) deliverAll(ctx context.Context, raw []byte) {
 		})
 		if err != nil {
 			log.Printf("deliver-batch: %v", err)
-			for _, rcpt := range s.recipients {
-				s.writeLine("451 4.5.0 temporary failure: %s", err.Error())
-				_ = rcpt
-			}
+			s.writeTemporaryFailures(len(rcpts))
+			return
+		}
+		if err := validateBatchResults(rcpts, results); err != nil {
+			log.Printf("deliver-batch invalid response: %v", err)
+			s.writeTemporaryFailures(len(rcpts))
 			return
 		}
 		for _, r := range results {
@@ -333,11 +373,32 @@ func (s *session) deliverAll(ctx context.Context, raw []byte) {
 		}
 		if err := s.srv.deliver(ctx, payload); err != nil {
 			log.Printf("deliver %s: %v", rcpt, err)
-			s.writeLine("451 4.5.0 temporary failure: %s", err.Error())
+			s.writeLine("451 4.5.0 temporary delivery failure")
 			continue
 		}
 		s.writeLine("250 2.0.0 <%s> accepted", rcpt)
 	}
+}
+
+func (s *session) writeTemporaryFailures(count int) {
+	for i := 0; i < count; i++ {
+		s.writeLine("451 4.5.0 temporary delivery failure")
+	}
+}
+
+func validateBatchResults(recipients []string, results []batchResult) error {
+	if len(results) != len(recipients) {
+		return fmt.Errorf("got %d results for %d recipients", len(results), len(recipients))
+	}
+	for i := range recipients {
+		if !strings.EqualFold(strings.TrimSpace(results[i].Recipient), recipients[i]) {
+			return fmt.Errorf("result %d recipient mismatch", i)
+		}
+		if results[i].Status != "delivered" && results[i].Status != "discarded" {
+			return fmt.Errorf("result %d has invalid status %q", i, results[i].Status)
+		}
+	}
+	return nil
 }
 
 func parseCommand(line string) (cmd, args string) {
@@ -377,10 +438,11 @@ func (s *server) deliver(ctx context.Context, payload deliverPayload) error {
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+		respBody, _ := readAndDrain(res.Body, 1024)
 		return fmt.Errorf("api HTTP %d: %s", res.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	return nil
+	_, err = readAndDrain(res.Body, 0)
+	return err
 }
 
 func (s *server) deliverBatch(ctx context.Context, payload deliverBatchPayload) ([]batchResult, error) {
@@ -399,7 +461,10 @@ func (s *server) deliverBatch(ctx context.Context, payload deliverBatchPayload) 
 		return nil, err
 	}
 	defer res.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(res.Body, 64*1024))
+	respBody, readErr := readAndDrain(res.Body, maxBatchResponseBytes)
+	if readErr != nil {
+		return nil, fmt.Errorf("read batch response: %w", readErr)
+	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return nil, fmt.Errorf("api HTTP %d: %s", res.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -408,6 +473,21 @@ func (s *server) deliverBatch(ctx context.Context, payload deliverBatchPayload) 
 		return nil, fmt.Errorf("decode batch response: %w", err)
 	}
 	return parsed.Results, nil
+}
+
+// readAndDrain keeps HTTP/1.1 connections reusable. When limit is positive,
+// only that many response bytes are retained while the remainder is discarded.
+func readAndDrain(r io.Reader, limit int64) ([]byte, error) {
+	var kept bytes.Buffer
+	if limit > 0 {
+		if _, err := io.Copy(&kept, io.LimitReader(r, limit)); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return nil, err
+	}
+	return kept.Bytes(), nil
 }
 
 func extractBodies(msg *mail.Message) (string, string) {
